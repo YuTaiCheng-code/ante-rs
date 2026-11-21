@@ -1,0 +1,5 @@
+<system-reminder>
+        ## Skills
+- 6 more not listed: the context window has no room to list them all.
+
+        </system-reminder>

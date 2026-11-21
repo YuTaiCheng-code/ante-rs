@@ -1,0 +1,33 @@
+[package]
+name = "ante"
+version = "0.3.4"
+edition = "2021"
+description = "Ante — an agent that lives in a terminal (clean-room Rust reimplementation)"
+license = "MIT"
+
+[[bin]]
+name = "ante"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+futures-util = "0.3"
+globset = "0.4"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+crossterm = "0.28"
+indexmap = { version = "2", features = ["serde"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "process", "time", "sync", "signal"] }
+walkdir = "2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

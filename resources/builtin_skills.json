@@ -1,0 +1,20 @@
+[
+ {
+  "name": "add-provider",
+  "description": "Add or update a custom model provider in Ante's catalog.json — an OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp server, an API gateway) or another wire style — discover its models, and declare per-model effort ladders. Use when the user wants to connect a custom or self-hosted endpoint, add models to a custom provider, or fix a missing or wrong effort slider for a custom-provider model. Not for built-in providers: those sign in with /providers or ante auth.",
+  "scope": "system",
+  "argument_hint": null
+ },
+ {
+  "name": "resume-claude",
+  "description": "Continue a Claude Code session in this directory — read its transcript, reconstruct what was going on, and pick the work up in Ante. Use when the user invokes /resume-claude, says they were just working in Claude Code, or asks to continue/import a Claude Code conversation.",
+  "scope": "system",
+  "argument_hint": null
+ },
+ {
+  "name": "resume-codex",
+  "description": "Continue a Codex CLI session from this directory — read its rollout transcript, reconstruct what was going on, and pick the work up in Ante. Use when the user invokes /resume-codex, says they were just working in Codex, or asks to continue/import a Codex conversation.",
+  "scope": "system",
+  "argument_hint": null
+ }
+]

@@ -1,0 +1,39 @@
+
+  ▄   ▀  ▄██▄  ▀   ▄
+  █  ▄█▄██████▄█▄  █
+  ▐█▄████████████▄█▌    Ante v0.3.4
+    ███▌*████*▐███      mock-model · val
+     ████████████       .../Doubao/chats/38455732014415618
+       ▀▀    ▀▀
+
+  * Update available: v0.3.7 (current v0.3.4)
+    └─ ### Added
+    └─ - `/rollover [instructions]` continues the conversation in a new session. The current session writes a handoff
+       and stays resumable; the new session starts from the handoff alone, under current prompts and settings. The
+       resume picker shows which session a session continues
+    └─ - Gemini 4 Neon on the Gemini API, Vertex AI and OpenRouter, with a 1,048,576-token context and low to xhigh
+       thinking. It defaults to high effort on Gemini API and Vertex
+    └─ ### Changed
+    └─ - The OpenAI API and subscription offer GPT-6.2 Sol in place of GPT-6.1 Sol, at low effort by default
+    └─ … 17 more at https://ante.run/changelog
+    └─ /update installs it on exit · /update skip skips this version
+
+  ┌ Theme ─────────────────────────────────────┐┌ Choose the text style that looks best with your terminal ──────────┐
+  │› 1. Dark mode ✓                            ││12   function greet() {                                             │
+  │  2. Light mode                             ││13 -     console.log("Hello, World!");                              │
+  │  3. Dark mode (colorblind-friendly)        ││13 +     console.log("Hello, Ante!!");                              │
+  │  4. Light mode (colorblind-friendly)       ││14   }                                                              │
+  │  5. Dark mode (ANSI colors only)           ││                                                                    │
+  │  6. Light mode (ANSI colors only)          ││                                                                    │
+  └────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+                                          ↑↓ navigate  Enter select  Esc cancel
+
+
+
+
+
+
+
+
+
+
