@@ -131,6 +131,6 @@ TUI 在真实 GUI 终端（xterm 372 + Xvfb，120×40）中的渲染截图：
 
 ![welcome](welcome.png)
 
-![命令面板](palette.png)
+![命令面板](command-palette.png)
 
 逐帧字符级一致性由 `tests/frame_test.py` 对原件黄金帧比对（9/9，相似度 1.000）。
