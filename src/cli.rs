@@ -167,6 +167,8 @@ pub enum AuthSub {
     Logout(AuthName),
     /// Store a secret (an API key) for a connector, read from stdin
     Add(AuthName),
+    /// Refresh an OAuth access token now
+    Refresh(AuthName),
     /// Forget a stored credential
     Rm(AuthName),
 }

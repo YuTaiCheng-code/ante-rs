@@ -68,7 +68,13 @@ impl LlmClient {
     }
 
     pub fn has_credential(&self) -> bool {
-        self.credential.is_some()
+        if self.credential.is_some() {
+            return true;
+        }
+        // The offline provider is a loopback llama.cpp router and needs no key.
+        self.provider_id == "offline"
+            && (self.provider.base_url.contains("127.0.0.1")
+                || self.provider.base_url.contains("localhost"))
     }
 
     fn endpoint(&self) -> String {

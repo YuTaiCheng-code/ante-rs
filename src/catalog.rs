@@ -187,6 +187,35 @@ impl Catalog {
             }
         }
 
+        // A running offline router exposes an OpenAI-compatible endpoint. Main
+        // publishes it through these variables before building the runtime.
+        if let (Ok(base), Ok(model)) = (
+            std::env::var("ANTE_OFFLINE_ENDPOINT"),
+            std::env::var("ANTE_OFFLINE_MODEL"),
+        ) {
+            providers.insert(
+                "offline".into(),
+                ProviderSpec {
+                    display_name: "Ante Offline (llama.cpp)".into(),
+                    base_url: base,
+                    credential: serde_json::json!([]),
+                    credential_header: None,
+                    wire_style: "OpenAiCompatible".into(),
+                    headers: IndexMap::new(),
+                    thinking_display: None,
+                    preferred_models: vec![ModelSpec {
+                        id: model.clone(),
+                        description: "local GGUF served by the pinned llama.cpp router".into(),
+                        max_tokens: Some(8192),
+                        context_limit: Some(32768),
+                        ..ModelSpec::default()
+                    }],
+                    max_request_images: None,
+                    supports_web_search: Some(false),
+                },
+            );
+        }
+
         Catalog {
             providers,
             oauth_profiles,

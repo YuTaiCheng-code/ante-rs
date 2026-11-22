@@ -73,6 +73,10 @@ pub async fn execute(ctx: &ToolCtx, name: &str, input: &Value) -> ToolResult {
         "TodoWrite" => todo::write(ctx, input),
         "AskUser" => ask_user(ctx, input),
         "Agent" => Box::pin(crate::agent::agent_tool(ctx, input)).await,
+        other if other.starts_with("mcp__") => match ctx.runtime.mcp.call(other, input).await {
+            Ok(result) => result,
+            Err(e) => ToolResult::err(e.to_string()),
+        },
         other => ToolResult::err(format!("unknown tool '{other}'")),
     }
 }

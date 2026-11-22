@@ -66,6 +66,58 @@ impl Message {
     }
 }
 
+/// Rough token estimate for UI accounting. ASCII text is about four bytes
+/// per token; non-ASCII text is closer to one token per character; tool JSON
+/// and images carry additional overhead.
+pub fn estimate_tokens(messages: &[Message]) -> u64 {
+    let mut total = 0u64;
+    for message in messages {
+        total += 4;
+        for block in &message.blocks {
+            let owned;
+            let (text, extra) = match block {
+                Block::Text(t) | Block::Thinking(t) => (t.as_str(), 0u64),
+                Block::ToolUse { input, .. } => {
+                    owned = serde_json::to_string(input).unwrap_or_default();
+                    (owned.as_str(), 0u64)
+                }
+                Block::ToolResult { content, .. } => (content.as_str(), 0u64),
+                Block::Image { .. } => ("", 1000u64),
+            };
+            total += rough_tokens(text) + extra;
+        }
+    }
+    total
+}
+
+fn rough_tokens(text: &str) -> u64 {
+    let mut ascii = 0u64;
+    let mut wide = 0u64;
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            wide += 1;
+        }
+    }
+    ascii / 4 + wide + 1
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn estimate_is_positive_and_counts_wide_text() {
+        let messages = vec![
+            Message::user_text("hello world"),
+            Message::user_text("你好，世界"),
+        ];
+        let n = estimate_tokens(&messages);
+        assert!(n >= 10, "{n}");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,

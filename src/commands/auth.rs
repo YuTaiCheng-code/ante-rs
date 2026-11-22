@@ -98,6 +98,23 @@ pub async fn run(cmd: AuthCmd) -> i32 {
                 }
             }
         }
+        AuthSub::Refresh(n) => {
+            let catalog = crate::catalog::Catalog::load();
+            match crate::credentials::refresh_stored(&n.name, &catalog, true).await {
+                Ok(true) => {
+                    println!("Refreshed OAuth token for {}", n.name);
+                    0
+                }
+                Ok(false) => {
+                    println!("No refresh was needed for {}", n.name);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
         AuthSub::Rm(n) => match crate::credentials::remove(&n.name) {
             Ok(msg) => {
                 println!("{msg}");

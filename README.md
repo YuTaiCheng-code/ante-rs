@@ -41,7 +41,18 @@ ante catalog
 ante doctor
 ante usage
 ante rage
+
+# 离线模式（钉死 llama.cpp b12182）
+ante offline install                 # 按平台/GPU 选包、校验 SHA-256、解压、自检、原子安装
+ante offline status                  # 引擎、模型目录、默认模型、router 状态
+ante offline list                    # 本地 GGUF + verified 模型
+ante offline use <model> --context 8192
+ante --offline-model <GGUF|名称|URL> -p "hi"
+ante offline stop                    # 按进程组停止 router
 ```
+
+离线安装会优先读取 `LLAMA_CACHE` 与 `ANTE_LLAMA_ARTIFACT`（本地包），下载源可用
+`ANTE_LLAMA_CPP_BASE_URL` 或 `ANTE_LLAMA_CPP_ARTIFACT_URL` 覆盖；正常安装不接受未校验产物。
 
 常用参数：`--effort`、`--yolo`、`--permission-mode`、`--system-prompt(-file)`、
 `--append-system-prompt`、`--short-prompt`、`--skills/--no-skills`、
@@ -95,7 +106,7 @@ resources/                        内嵌 catalog、工具 schema、提示词分�
 
 - 远程 `auth add` 校验以 `GET /models` 近似，未复刻原件的私有校验端点
 - 未逐帧复刻全屏 TUI，提供等价 REPL
-- MCP、离线推理、自动更新为基本流程实现
+- 离线模式已实现引擎安装、router 生命周期与本地推理；MCP、自动更新为基本流程实现
 
 ## 逐帧一致性测试
 
@@ -118,8 +129,8 @@ resources/                        内嵌 catalog、工具 schema、提示词分�
 
 TUI 在真实 GUI 终端（xterm 372 + Xvfb，120×40）中的渲染截图：
 
-![welcome](docs/screenshots/welcome.png)
+![welcome](welcome.png)
 
-![命令面板](docs/screenshots/palette.png)
+![命令面板](command-palette.png)
 
 逐帧字符级一致性由 `tests/frame_test.py` 对原件黄金帧比对（9/9，相似度 1.000）。

@@ -246,6 +246,107 @@ pub fn apply_header(
     builder.header(header, value)
 }
 
+/// Refresh an OAuth access token using the catalog's token endpoint.
+/// `force` refreshes even when the current token is not close to expiry.
+pub async fn refresh_stored(
+    name: &str,
+    catalog: &Catalog,
+    force: bool,
+) -> Result<bool> {
+    let Some(secret) = get(name) else {
+        return Err(anyhow!("no stored credential named '{name}'"));
+    };
+    if secret.kind != "oauth" {
+        return Err(anyhow!("'{name}' is not an OAuth credential"));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if !force {
+        if let Some(expires) = secret.expires_at {
+            if expires > now.saturating_add(300) {
+                return Ok(false);
+            }
+        } else {
+            return Ok(false);
+        }
+    }
+    let refresh_token = secret
+        .refresh_token
+        .clone()
+        .ok_or_else(|| anyhow!("'{name}' has no refresh token; sign in again"))?;
+    let base = name.split('/').next().unwrap_or(name);
+    let profile = catalog
+        .oauth_profiles
+        .get(base)
+        .or_else(|| catalog.oauth_profiles.get(name))
+        .ok_or_else(|| anyhow!("no OAuth profile named '{base}'"))?;
+    let token_url = profile
+        .get("token_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("OAuth profile '{base}' has no token_url"))?;
+    let client_id = profile
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ante");
+    let mut form = vec![
+        ("grant_type", "refresh_token"),
+        ("client_id", client_id),
+        ("refresh_token", refresh_token.as_str()),
+    ];
+    if let Some(secret_value) = profile.get("client_secret").and_then(|v| v.as_str()) {
+        form.push(("client_secret", secret_value));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+    let resp = client.post(token_url).form(&form).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "OAuth refresh for '{name}' failed: HTTP {}",
+            resp.status().as_u16()
+        ));
+    }
+    let value: serde_json::Value = resp.json().await?;
+    let access = value
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("OAuth refresh response has no access_token"))?;
+    let new_refresh = value
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or(Some(refresh_token));
+    let expires_at = value.get("expires_in").and_then(|v| v.as_u64()).map(|secs| now + secs);
+    store_oauth(name, access, new_refresh, expires_at, base)?;
+    Ok(true)
+}
+
+/// Refresh only when a provider credential uses an expired OAuth token.
+pub async fn refresh_if_needed(
+    spec: &serde_json::Value,
+    catalog: &Catalog,
+) -> Result<Option<String>> {
+    for name in oauth_names(spec) {
+        if refresh_stored(&name, catalog, false).await? {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+fn oauth_names(spec: &serde_json::Value) -> Vec<String> {
+    match spec {
+        serde_json::Value::String(s) => s
+            .strip_prefix("oauth:")
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default(),
+        serde_json::Value::Array(items) => items.iter().flat_map(oauth_names).collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn store_oauth(name: &str, access: &str, refresh: Option<String>, expires_at: Option<u64>, profile: &str) -> Result<()> {
     save(
         name,
@@ -401,5 +502,51 @@ fn helper_value(name: &str, catalog: &Catalog) -> Result<String> {
             }
             Err(e) => return Err(anyhow!("helper `{name}`: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn refreshes_expired_oauth_token_against_local_mock() {
+        let _guard = crate::util::TEST_ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("ante-oauth-test-{}", crate::util::ulid()));
+        std::env::set_var("ANTE_HOME", &home);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let body = r#"{"access_token":"new-token","refresh_token":"new-refresh","expires_in":3600}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let mut catalog = Catalog::default();
+        catalog.oauth_profiles.insert(
+            "test".to_string(),
+            serde_json::json!({
+                "token_url": format!("http://{addr}/token"),
+                "client_id": "ante-test"
+            }),
+        );
+        store_oauth("test", "old-token", Some("old-refresh".into()), Some(1), "test").unwrap();
+        let refreshed = refresh_stored("test", &catalog, true).await.unwrap();
+        assert!(refreshed);
+        let secret = get("test").unwrap();
+        assert_eq!(secret.value, "new-token");
+        assert_eq!(secret.refresh_token.as_deref(), Some("new-refresh"));
+        assert!(secret.expires_at.unwrap() > 1);
+        let _ = std::fs::remove_dir_all(home);
     }
 }

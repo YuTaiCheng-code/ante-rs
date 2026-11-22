@@ -171,3 +171,6 @@ pub fn folder_structure(dir: &Path, depth: usize) -> String {
 pub fn path_from_str(p: &str) -> PathBuf {
     expand_tilde(p)
 }
+
+#[cfg(test)]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

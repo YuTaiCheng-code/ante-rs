@@ -12,6 +12,34 @@ pub struct Skill {
     pub path: Option<PathBuf>,
     #[serde(skip_serializing, default)]
     pub user_invocable: bool,
+    #[serde(skip_serializing, default)]
+    pub body_text: Option<String>,
+}
+
+const BUILTIN_SKILL_FILES: &[(&str, &str)] = &[
+    ("add-provider", include_str!("../resources/builtin_skills/add-provider.md")),
+    ("ante-guide", include_str!("../resources/builtin_skills/ante-guide.md")),
+    ("resume-claude", include_str!("../resources/builtin_skills/resume-claude.md")),
+    ("resume-codex", include_str!("../resources/builtin_skills/resume-codex.md")),
+    ("skill-creator", include_str!("../resources/builtin_skills/skill-creator.md")),
+    ("tmux", include_str!("../resources/builtin_skills/tmux.md")),
+];
+
+fn builtin_skills() -> Vec<Skill> {
+    let mut out = Vec::new();
+    for (fallback_name, text) in BUILTIN_SKILL_FILES {
+        let (fm, _) = parse_frontmatter(text);
+        out.push(Skill {
+            name: fm.get("name").cloned().unwrap_or_else(|| (*fallback_name).to_string()),
+            description: fm.get("description").cloned().unwrap_or_default(),
+            scope: "builtin".into(),
+            argument_hint: fm.get("argument-hint").cloned(),
+            user_invocable: fm.get("user-invocable").map(|v| v != "false").unwrap_or(true),
+            path: None,
+            body_text: Some(text.to_string()),
+        });
+    }
+    out
 }
 
 fn parse_frontmatter(text: &str) -> (std::collections::BTreeMap<String, String>, String) {
@@ -68,21 +96,44 @@ pub fn discover(cwd: &Path) -> Vec<Skill> {
                         .map(|v| v != "false")
                         .unwrap_or(true),
                     path: Some(path),
+                    body_text: None,
                 });
             }
         }
     }
-    if out.is_empty() {
-        if let Ok(list) = serde_json::from_str::<Vec<Skill>>(crate::runtime::BUILTIN_SKILLS) {
-            out = list;
+    // Built-in skills are always available; an on-disk skill with the same
+    // name shadows the built-in version.
+    for builtin in builtin_skills() {
+        if !out.iter().any(|s| s.name == builtin.name) {
+            out.push(builtin);
         }
     }
     out
 }
 
 pub fn body(skill: &Skill) -> Option<String> {
+    if let Some(text) = &skill.body_text {
+        let (_, body) = parse_frontmatter(text);
+        return Some(body);
+    }
     let p = skill.path.as_ref()?;
     let text = std::fs::read_to_string(p).ok()?;
     let (_, body) = parse_frontmatter(&text);
     Some(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_skills_are_always_available_with_bodies() {
+        let skills = discover(Path::new("/"));
+        for name in ["add-provider", "ante-guide", "resume-claude", "resume-codex", "skill-creator", "tmux"] {
+            let skill = skills.iter().find(|s| s.name == name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(skill.scope, "builtin");
+            let body = body(skill).unwrap();
+            assert!(body.len() > 500, "{name} body too short");
+        }
+    }
 }

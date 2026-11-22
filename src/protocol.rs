@@ -103,6 +103,11 @@ impl Server {
                     session_id: None,
                     interactive: false,
                 });
+                if !rt.mcp.configured().is_empty() {
+                    if let Err(e) = rt.mcp.start().await {
+                        eprintln!("warning: MCP initialization failed: {e}");
+                    }
+                }
                 let rt = Arc::new(rt);
                 let mut session = Session::new(rt.provider_id.clone(), rt.model.id.clone(), rt.short_prompt);
                 session.system = rt.system_sections();

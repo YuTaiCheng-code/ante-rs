@@ -37,19 +37,29 @@ pub async fn run(rt: Arc<Runtime>, save: bool) -> i32 {
                     println!("Conversation cleared.");
                 }
                 "compact" => {
+                    let handoff = crate::goal::handoff(&rt, &messages, arg).await;
                     let kept = messages.len().min(4);
                     let tail: Vec<Message> = messages[messages.len() - kept..].to_vec();
-                    messages = vec![Message::user_text(
-                        "<system-reminder>Earlier conversation was compacted to save context.</system-reminder>",
-                    )];
-                    messages.extend(tail);
-                    println!("Conversation compacted.");
+                    let mut compacted = vec![Message::user_text(format!(
+                        "<system-reminder>Earlier conversation was compacted. Handoff:\n{handoff}\n</system-reminder>"
+                    ))];
+                    compacted.extend(tail);
+                    messages = compacted;
+                    session.messages = messages.clone();
+                    let _ = session.save();
+                    println!("Conversation compacted with a handoff summary.");
                 }
                 "context" => {
-                    let used: usize = messages.iter().map(|m| m.text().len()).sum::<usize>() / 4;
+                    let used = crate::llm::estimate_tokens(&messages);
+                    let limit = rt.model.context_limit.unwrap_or(0);
+                    let pct = if limit > 0 {
+                        format!(" ({:.1}%)", used as f64 / limit as f64 * 100.0)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "Context: ~{used} tokens used of {} limit; {} messages.",
-                        rt.model.context_limit.unwrap_or(0),
+                        "Context estimate: ~{used} tokens{pct} of {} limit; {} messages.",
+                        if limit == 0 { "unknown".to_string() } else { limit.to_string() },
                         messages.len()
                     );
                 }
@@ -127,7 +137,27 @@ pub async fn run(rt: Arc<Runtime>, save: bool) -> i32 {
                         println!("Usage: /rename <title>");
                     } else {
                         session.meta.first_user_message = arg.to_string();
+                        let _ = session.save();
                         println!("Session renamed to: {arg}");
+                    }
+                }
+                "memory" => {
+                    println!("{}", crate::memory::command(arg));
+                }
+                "jobs" => {
+                    let jobs = rt.jobs.list();
+                    if jobs.is_empty() {
+                        println!("No background jobs.");
+                    } else {
+                        for job in jobs {
+                            println!(
+                                "{} pid={} running={} exit={}",
+                                job.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                                job.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+                                job.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+                                job.get("exit_code").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "-".into())
+                            );
+                        }
                     }
                 }
                 "mcp" => {
@@ -137,6 +167,17 @@ pub async fn run(rt: Arc<Runtime>, save: bool) -> i32 {
                         for (name, cfg) in &rt.settings.mcp_servers {
                             println!("{name}: {}", crate::util::truncate(&cfg.to_string(), 200, "…"));
                         }
+                        let tools = rt.mcp.tool_schemas();
+                        if tools.is_empty() {
+                            println!("No MCP tools discovered (server may have failed to start).");
+                        } else {
+                            println!("Connected tools:");
+                            for tool in tools {
+                                if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+                                    println!("  {name}");
+                                }
+                            }
+                        }
                     }
                 }
                 "goal" => {
@@ -145,16 +186,40 @@ pub async fn run(rt: Arc<Runtime>, save: bool) -> i32 {
                 }
                 "welcome" => welcome(&rt),
                 "fork" => {
-                    let id = format!("ses_{}", crate::util::ulid());
-                    println!("Forked session: {id}");
-                    println!("The fork starts from the current conversation; resume it with `ante --resume {id}`.");
+                    let points = session.snapshot_numbers();
+                    let number = arg.trim().parse::<usize>().ok().or_else(|| points.last().copied());
+                    match number.map(|n| session.fork_from(n)) {
+                        Some(Ok(fork)) => {
+                            let id = fork.meta.id.clone();
+                            session = fork;
+                            messages = session.messages.clone();
+                            println!("Forked session: {id} (continuing in the fork)");
+                        }
+                        Some(Err(e)) => println!("Fork failed: {e}"),
+                        None => println!("No snapshot yet. Send a prompt first."),
+                    }
                 }
                 "rewind" => {
-                    let prompts = messages
-                        .iter()
-                        .filter(|m| m.role == crate::llm::Role::User)
-                        .count();
-                    println!("Rewind points: {prompts} user prompt(s). Use `ante --resume` to reopen an earlier session.");
+                    let points = session.snapshot_numbers();
+                    if arg.is_empty() {
+                        println!("Rewind points: {}", points.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
+                        if let Some(last) = points.last() {
+                            println!("Use `/rewind {last}` to restore the latest prompt boundary.");
+                        }
+                    } else {
+                        match arg.trim().parse::<usize>() {
+                            Ok(n) => match session.load_snapshot(n) {
+                                Ok(restored) => {
+                                    messages = restored;
+                                    session.messages = messages.clone();
+                                    let _ = session.save();
+                                    println!("Rewound to snapshot {n} ({} messages).", messages.len());
+                                }
+                                Err(e) => println!("Rewind failed: {e}"),
+                            },
+                            Err(_) => println!("Usage: /rewind [snapshot-number]"),
+                        }
+                    }
                 }
                 "offline-mode" => {
                     println!(
@@ -169,8 +234,31 @@ pub async fn run(rt: Arc<Runtime>, save: bool) -> i32 {
                 "theme" | "statusline" | "update" => {
                     println!("/{cmd} is not available in this build.");
                 }
-                "resume" | "import-claude" => {
-                    println!("Session resume is available from the CLI: `ante --resume <session-id>`.");
+                "resume" => {
+                    if arg.is_empty() {
+                        let sessions = Session::list();
+                        if sessions.is_empty() {
+                            println!("No saved sessions.");
+                        } else {
+                            for meta in sessions.iter().take(12) {
+                                println!("{}  {}  {}", meta.id, meta.last_active_time, crate::util::truncate(&meta.first_user_message, 60, "…"));
+                            }
+                            println!("Use `/resume <session-id>`.");
+                        }
+                    } else {
+                        match Session::load(arg.trim()) {
+                            Ok(mut loaded) => {
+                                messages = loaded.messages.clone();
+                                loaded.system = rt.system_sections();
+                                session = loaded;
+                                println!("Resumed {}.", session.meta.id);
+                            }
+                            Err(e) => println!("Resume failed: {e}"),
+                        }
+                    }
+                }
+                "import-claude" => {
+                    println!("{}", crate::memory::import_claude(&rt.cwd));
                 }
                 _ => {
                     if let Some(skill) = skills.iter().find(|s| s.name == cmd) {
@@ -210,6 +298,16 @@ pub async fn run(rt: Arc<Runtime>, save: bool) -> i32 {
         let text = format!("{}\n\n{}", input, rt.folder_structure());
         session.note_user_message(&input);
         messages.push(Message::user_text(text));
+        session.messages = messages.clone();
+        let snapshot_number = session
+            .snapshot_numbers()
+            .last()
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        if let Err(e) = session.save_snapshot(snapshot_number) {
+            eprintln!("warning: failed to save rewind snapshot: {e}");
+        }
         turn(&rt, &mut messages, &ctx, &mut session).await;
 
     // 目标闭环：每轮结束后由判定器决定是否继续。

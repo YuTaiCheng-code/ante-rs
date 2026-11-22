@@ -11,7 +11,9 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
+use crate::llm::Message;
 use crate::runtime::Runtime;
+use crate::session::Session;
 
 const COMMANDS: &[(&str, &str)] = &[
     ("add-provider", "✨[s] Add or update a custom model provider in Ante's catalog.json — an OpenAI-compatible endpoint"),
@@ -24,8 +26,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("fork", "Fork the conversation into a new session from an earlier prompt"),
     ("goal", "Keep working until a condition is met (judged after each turn)"),
     ("import-claude", "Import Claude Code memory for this project"),
+    ("jobs", "List background jobs and their output paths"),
     ("init", "Initialize this project with AGENTS.md"),
     ("mcp", "Manage MCP servers"),
+    ("memory", "Show or manage persistent auto memory"),
     ("model", "Select a model and effort"),
     ("models", "Select a model and effort"),
     ("offline-mode", "Use a local model with the local inference engine"),
@@ -47,17 +51,131 @@ enum Overlay {
     Models,
 }
 
+const RESET: &str = "\x1b[0m";
+
+fn fg(r: u8, g: u8, b: u8) -> String {
+    format!("\x1b[38;2;{r};{g};{b}m")
+}
+
+/// 原件 Logo 是按列插值的橙色渐变。
+fn art_color(x: u16) -> (u8, u8, u8) {
+    match x {
+        2 => (255, 175, 0),
+        3 => (215, 175, 0),
+        4..=7 => (215, 135, 0),
+        8..=12 => (175, 135, 0),
+        13..=19 => (175, 95, 0),
+        _ => (215, 135, 0),
+    }
+}
+
 pub struct Tui {
     rt: Arc<Runtime>,
     input: String,
     messages: Vec<String>,
     banner: bool,
     overlay: Option<Overlay>,
+    history: Vec<Message>,
+    session: Session,
+    ctx: crate::tools::ToolCtx,
+    goal: Option<crate::goal::Goal>,
 }
 
 impl Tui {
     pub fn new(rt: Arc<Runtime>) -> Tui {
-        Tui { rt, input: String::new(), messages: Vec::new(), banner: true, overlay: None }
+        let mut session = Session::new(rt.provider_id.clone(), rt.model.id.clone(), rt.short_prompt);
+        session.system = rt.system_sections();
+        let ctx = crate::tools::ToolCtx::new(rt.clone(), rt.cwd.clone());
+        Tui {
+            rt,
+            input: String::new(),
+            messages: Vec::new(),
+            banner: true,
+            overlay: None,
+            history: Vec::new(),
+            session,
+            ctx,
+            goal: None,
+        }
+    }
+
+    async fn submit(&mut self, line: String) {
+        let text = format!("{}\n\n{}", line, self.rt.folder_structure());
+        self.history.push(Message::user_text(text));
+        self.session.note_user_message(&line);
+        self.session.messages = self.history.clone();
+        let snapshot_number = self
+            .session
+            .snapshot_numbers()
+            .last()
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        let _ = self.session.save_snapshot(snapshot_number);
+
+        self.run_turn_once(Some(&line)).await;
+
+        while let Some(g) = self.goal.clone() {
+            let verdict = crate::goal::evaluate(&self.rt, &self.history, &g.condition).await;
+            let (line, active) = crate::goal::apply(&mut self.goal, verdict);
+            self.messages.push(line);
+            if !active {
+                break;
+            }
+            let condition = self
+                .goal
+                .as_ref()
+                .map(|x| x.condition.clone())
+                .unwrap_or_default();
+            self.history.push(Message::user_text(format!(
+                "The goal condition is still not satisfied. Continue working toward: {condition}"
+            )));
+            self.run_turn_once(None).await;
+        }
+    }
+
+    async fn run_turn_once(&mut self, announce: Option<&str>) {
+        let mut out = std::io::stdout();
+        let _ = execute!(out, cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = terminal::disable_raw_mode();
+        if let Some(line) = announce {
+            println!("\n❯ {line}");
+        }
+        let mut rendered = String::new();
+        let outcome = crate::agent::run_turn(
+            &self.rt,
+            &mut self.history,
+            &self.ctx,
+            32,
+            |event| match event {
+                crate::agent::AgentEvent::TextDelta(t) => {
+                    print!("{t}");
+                    let _ = std::io::stdout().flush();
+                    rendered.push_str(&t);
+                }
+                crate::agent::AgentEvent::ToolStart { name, .. } => {
+                    println!("\n✓ {name}");
+                }
+                crate::agent::AgentEvent::Usage(u) => {
+                    self.session.meta.usage.input_tokens += u.input_tokens;
+                    self.session.meta.usage.output_tokens += u.output_tokens;
+                }
+                _ => {}
+            },
+        )
+        .await;
+        println!();
+        if let Some(err) = outcome.error {
+            eprintln!("Task failed: {err}");
+        }
+        if !rendered.is_empty() {
+            self.messages.push(format!("❖ Ante  {rendered}"));
+        }
+        self.session.messages = self.history.clone();
+        let _ = self.session.save();
+
+        let _ = terminal::enable_raw_mode();
+        let _ = execute!(out, terminal::EnterAlternateScreen, cursor::Hide);
     }
 
     fn cols(&self) -> u16 {
@@ -89,16 +207,28 @@ impl Tui {
                 (6, "▀██▀▀▀▀██▀"),
             ];
             for (i, (x, text)) in art.iter().enumerate() {
-                queue!(out, cursor::MoveTo(*x, 1 + i as u16), Print(text))?;
+                queue!(out, cursor::MoveTo(*x, 1 + i as u16))?;
+                let mut painted = String::new();
+                for (j, ch) in text.chars().enumerate() {
+                    let (r, g, b) = art_color(x + j as u16);
+                    painted.push_str(&fg(r, g, b));
+                    painted.push(ch);
+                }
+                painted.push_str(RESET);
+                queue!(out, Print(painted))?;
             }
             queue!(
                 out,
                 cursor::MoveTo(24, 3),
-                Print(format!("Ante v{}", crate::VERSION)),
+                Print(format!("{}Ante v{}{RESET}", fg(255, 135, 95), crate::VERSION)),
                 cursor::MoveTo(24, 4),
-                Print(format!("{} · {}", self.rt.model.id, self.rt.provider_id)),
+                Print(if self.rt.provider_id.is_empty() {
+                    format!("{}not connected — run /providers to sign in{RESET}", fg(135, 175, 175))
+                } else {
+                    format!("{} · {}", self.rt.model.id, self.rt.provider_id)
+                }),
                 cursor::MoveTo(24, 5),
-                Print(tail_path(&self.rt.cwd.display().to_string(), cols.saturating_sub(26) as usize)),
+                Print(format!("{}{}{RESET}", fg(95, 95, 135), tail_path(&self.rt.cwd.display().to_string(), cols.saturating_sub(26) as usize))),
             )?;
         }
 
@@ -152,15 +282,33 @@ impl Tui {
         let top = sep_y + 3;
         let height = status_y.saturating_sub(top) as usize;
         for (i, (name, desc)) in matches.iter().take(height).enumerate() {
+            let prefix = if i == 0 { "  → " } else { "    " };
+            let prefix_color = if i == 0 {
+                fg(215, 95, 95)
+            } else {
+                fg(95, 95, 135)
+            };
+            let name_color = if i == 0 {
+                fg(255, 135, 95)
+            } else {
+                fg(135, 175, 175)
+            };
+            let desc_color = if i == 0 {
+                fg(255, 215, 175)
+            } else {
+                fg(160, 160, 160)
+            };
+            let desc = ellipsis(
+                desc,
+                self.cols().saturating_sub(name.len() as u16 + 10) as usize,
+            );
             queue!(
                 out,
                 cursor::MoveTo(0, top + i as u16),
                 Print(" ".repeat(self.cols() as usize)),
                 cursor::MoveTo(0, top + i as u16),
                 Print(format!(
-                    "{}/{name} - {}",
-                    if i == 0 { "  → " } else { "    " },
-                    ellipsis(desc, self.cols().saturating_sub(name.len() as u16 + 10) as usize)
+                    "{prefix_color}{prefix}{RESET}{name_color}/{name}{RESET} {desc_color}- {desc}{RESET}"
                 ))
             )?;
         }
@@ -330,7 +478,7 @@ impl Tui {
         Ok(())
     }
 
-    fn handle_command(&mut self, line: &str) {
+    async fn handle_command(&mut self, line: &str) {
         let (cmd, arg) = line.trim_start_matches('/').split_once(' ').unwrap_or((line.trim_start_matches('/'), ""));
         match cmd {
             "exit" | "quit" => std::process::exit(0),
@@ -360,18 +508,188 @@ impl Tui {
                     self.messages.push(format!("model: {arg} (applies to the next session)"));
                 }
             }
-            "usage" => self.messages.push("usage: 0 input / 0 output tokens".into()),
-            "context" => self.messages.push(format!(
-                "context: 0 of {} tokens",
-                self.rt.model.context_limit.unwrap_or(0)
+            "usage" => self.messages.push(format!(
+                "Session usage: {} input / {} output tokens",
+                self.session.meta.usage.input_tokens, self.session.meta.usage.output_tokens
             )),
+            "context" => {
+                let used = crate::llm::estimate_tokens(&self.history);
+                let limit = self.rt.model.context_limit.unwrap_or(0);
+                let pct = if limit > 0 {
+                    format!(" ({:.1}%)", used as f64 / limit as f64 * 100.0)
+                } else {
+                    String::new()
+                };
+                self.messages.push(format!(
+                    "Context estimate: ~{used} tokens{pct} of {} limit; {} messages.",
+                    if limit == 0 { "unknown".to_string() } else { limit.to_string() },
+                    self.history.len()
+                ));
+            }
+            "compact" => {
+                let handoff = crate::goal::handoff(&self.rt, &self.history, arg).await;
+                let kept = self.history.len().min(4);
+                let tail: Vec<Message> =
+                    self.history[self.history.len().saturating_sub(kept)..].to_vec();
+                let mut compacted = vec![Message::user_text(format!(
+                    "<system-reminder>Earlier conversation was compacted. Handoff:\n{handoff}\n</system-reminder>"
+                ))];
+                compacted.extend(tail);
+                self.history = compacted;
+                self.session.messages = self.history.clone();
+                let _ = self.session.save();
+                self.messages
+                    .push("Conversation compacted with a handoff summary.".into());
+            }
+            "goal" => {
+                let (line, _) = crate::goal::Goal::command(arg, &mut self.goal);
+                self.messages.push(line);
+            }
+            "diff" => {
+                let out = std::process::Command::new("git")
+                    .args(["status", "--short"])
+                    .current_dir(&self.rt.cwd)
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        let status = String::from_utf8_lossy(&o.stdout);
+                        let diff = std::process::Command::new("git")
+                            .args(["diff", "--stat"])
+                            .current_dir(&self.rt.cwd)
+                            .output()
+                            .ok()
+                            .map(|d| String::from_utf8_lossy(&d.stdout).to_string())
+                            .unwrap_or_default();
+                        let text = format!("{status}{diff}");
+                        self.messages.push(if text.trim().is_empty() {
+                            "Working tree clean.".into()
+                        } else {
+                            text.trim_end().to_string()
+                        });
+                    }
+                    _ => self.messages.push("Not a git repository (or git is unavailable).".into()),
+                }
+            }
+            "mcp" => {
+                if self.rt.settings.mcp_servers.is_empty() {
+                    self.messages
+                        .push("No MCP servers configured. Add them under `mcp_servers` in settings.json.".into());
+                } else {
+                    for (name, cfg) in &self.rt.settings.mcp_servers {
+                        self.messages.push(format!(
+                            "{name}: {}",
+                            crate::util::truncate(&cfg.to_string(), 200, "…")
+                        ));
+                    }
+                    let tools = self.rt.mcp.tool_schemas();
+                    if tools.is_empty() {
+                        self.messages
+                            .push("No MCP tools discovered (server may have failed to start).".into());
+                    } else {
+                        for tool in tools {
+                            if let Some(name) = tool.get("name").and_then(|v| v.as_str()) {
+                                self.messages.push(format!("  {name}"));
+                            }
+                        }
+                    }
+                }
+            }
+            "jobs" => {
+                let jobs = self.rt.jobs.list();
+                if jobs.is_empty() {
+                    self.messages.push("No background jobs.".into());
+                } else {
+                    for job in jobs {
+                        self.messages.push(format!(
+                            "{} pid={} running={} exit={}",
+                            job.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                            job.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+                            job.get("running").and_then(|v| v.as_bool()).unwrap_or(false),
+                            job.get("exit_code").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "-".into())
+                        ));
+                    }
+                }
+            }
+            "init" => {
+                let path = self.rt.cwd.join("AGENTS.md");
+                if path.exists() {
+                    self.messages
+                        .push(format!("AGENTS.md already exists at {}", path.display()));
+                } else {
+                    match std::fs::write(
+                        &path,
+                        "# Project instructions\n\n- Add repository conventions here; Ante reads this file at session start.\n",
+                    ) {
+                        Ok(()) => self.messages.push(format!("Created {}", path.display())),
+                        Err(e) => self.messages.push(format!("Failed to create AGENTS.md: {e}")),
+                    }
+                }
+            }
+            "rename" => {
+                if arg.trim().is_empty() {
+                    self.messages.push("Usage: /rename <title>".into());
+                } else {
+                    self.session.meta.first_user_message = arg.trim().to_string();
+                    let _ = self.session.save();
+                    self.messages.push(format!("Session renamed to: {}", arg.trim()));
+                }
+            }
+            "import-claude" => {
+                self.messages.push(crate::memory::import_claude(&self.rt.cwd));
+            }
             "theme" => self.overlay = Some(Overlay::Theme(0)),
             "term" => {
                 self.messages.push(crate::tools::term::command(arg, &self.rt.cwd));
             }
-            "statusline" | "update" | "offline-mode" | "mcp" | "goal" | "diff"
-            | "init" | "compact" | "rename" | "resume" | "rewind" | "fork" | "import-claude"
-            | "add-provider" => {
+            "memory" => self.messages.push(crate::memory::command(arg)),
+            "rewind" => {
+                let points = self.session.snapshot_numbers();
+                if arg.is_empty() {
+                    self.messages.push(format!("rewind points: {}", points.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")));
+                } else if let Ok(n) = arg.trim().parse::<usize>() {
+                    match self.session.load_snapshot(n) {
+                        Ok(restored) => {
+                            self.history = restored;
+                            self.session.messages = self.history.clone();
+                            let _ = self.session.save();
+                            self.messages.push(format!("rewound to snapshot {n}"));
+                        }
+                        Err(e) => self.messages.push(format!("rewind failed: {e}")),
+                    }
+                }
+            }
+            "fork" => {
+                let points = self.session.snapshot_numbers();
+                let n = arg.trim().parse::<usize>().ok().or_else(|| points.last().copied());
+                match n.map(|n| self.session.fork_from(n)) {
+                    Some(Ok(fork)) => {
+                        let id = fork.meta.id.clone();
+                        self.session = fork;
+                        self.history = self.session.messages.clone();
+                        self.messages.push(format!("forked: {id} (continuing here)"));
+                    }
+                    Some(Err(e)) => self.messages.push(format!("fork failed: {e}")),
+                    None => self.messages.push("no snapshot yet".into()),
+                }
+            }
+            "resume" => {
+                if arg.trim().is_empty() {
+                    for meta in Session::list().into_iter().take(8) {
+                        self.messages.push(format!("{}  {}", meta.id, crate::util::truncate(&meta.first_user_message, 50, "…")));
+                    }
+                } else {
+                    match Session::load(arg.trim()) {
+                        Ok(loaded) => {
+                            self.history = loaded.messages.clone();
+                            self.session = loaded;
+                            self.session.system = self.rt.system_sections();
+                            self.messages.push(format!("resumed {}", self.session.meta.id));
+                        }
+                        Err(e) => self.messages.push(format!("resume failed: {e}")),
+                    }
+                }
+            }
+            "statusline" | "update" | "offline-mode" | "add-provider" => {
                 self.messages.push(format!("/{cmd} is available in the full TUI build only."));
             }
             other => self.messages.push(format!("Unknown command: /{other}")),
@@ -414,10 +732,10 @@ pub async fn run(rt: Arc<Runtime>, _save: bool) -> i32 {
                         continue;
                     }
                     if line.starts_with('/') {
-                        tui.handle_command(&line);
+                        tui.handle_command(&line).await;
                     } else {
                         tui.messages.push(format!("❯ {line}"));
-                        tui.messages.push("(streaming responses are shown in the full build)".into());
+                        tui.submit(line).await;
                     }
                 }
                 _ => {}

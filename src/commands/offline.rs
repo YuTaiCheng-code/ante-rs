@@ -1,74 +1,84 @@
 use serde_json::{json, Value};
 
 use crate::cli::{OfflineCmd, OfflineSub};
+use crate::offline_engine;
+use crate::offline_router;
 use crate::settings::Settings;
 
 fn config_path() -> std::path::PathBuf {
-    crate::util::ante_home().join("offline-config.json")
+    offline_router::config_path()
 }
 
 fn load_config() -> Value {
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| {
-            json!({
-                "model_dir": crate::util::ante_home().join("models").display().to_string(),
-                "default_model": Value::Null,
-                "context": Value::Null,
-                "thinking": "on",
-                "temperature": Value::Null,
-                "extra": ""
-            })
-        })
-}
-
-fn engine_path() -> std::path::PathBuf {
-    crate::util::ante_home().join("offline/llama-server")
+    offline_router::load_config()
 }
 
 pub fn run(cmd: OfflineCmd, _settings: &Settings) -> i32 {
     match cmd.command {
         OfflineSub::Status(c) => {
             let cfg = load_config();
-            let installed = engine_path().exists();
+            let installed = offline_engine::installed();
             let model_dir = cfg
                 .get("model_dir")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let router = offline_router::status();
             if c.json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "engine": if installed { "installed" } else { "not installed" },
-                        "engine_path": engine_path().display().to_string(),
+                        "engine_path": offline_engine::engine_binary().display().to_string(),
+                        "pinned_version": offline_engine::PINNED_VERSION,
                         "model_dir": model_dir,
                         "default_model": cfg.get("default_model").cloned().unwrap_or(Value::Null),
-                        "router": "stopped",
+                        "router": router.get("router").cloned().unwrap_or(Value::Null),
+                        "pid": router.get("pid").cloned().unwrap_or(Value::Null),
+                        "port": router.get("port").cloned().unwrap_or(Value::Null),
                         "servers": [],
                     }))
                     .unwrap_or_default()
                 );
             } else {
                 println!("Ante offline status");
-                println!("  engine:       {}", if installed { "installed (llama.cpp)" } else { "not installed" });
+                println!(
+                    "  engine:       {}",
+                    if installed {
+                        format!("installed (llama.cpp {})", offline_engine::PINNED_VERSION)
+                    } else {
+                        "not installed".to_string()
+                    }
+                );
+                println!("  engine path:  {}", offline_engine::engine_binary().display());
                 println!("  model dir:    {model_dir}");
                 println!(
                     "  default:      {}",
                     cfg.get("default_model").and_then(|v| v.as_str()).unwrap_or("-")
                 );
-                println!("  router:       stopped");
+                match router.get("router").and_then(|v| v.as_str()) {
+                    Some("running") => {
+                        println!(
+                            "  router:       running (PID {}, port {})",
+                            router.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+                            router.get("port").and_then(|v| v.as_u64()).unwrap_or(0)
+                        );
+                        println!(
+                            "  model:        {}",
+                            router.get("model").and_then(|v| v.as_str()).unwrap_or("-")
+                        );
+                        println!(
+                            "  endpoint:     {}",
+                            router.get("base_url").and_then(|v| v.as_str()).unwrap_or("-")
+                        );
+                    }
+                    _ => println!("  router:       stopped"),
+                }
             }
             0
         }
         OfflineSub::List(c) => {
-            let cfg = load_config();
-            let dir = cfg
-                .get("model_dir")
-                .and_then(|v| v.as_str())
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| crate::util::ante_home().join("models"));
+            let dir = offline_router::model_dir();
             let mut models = Vec::new();
             if let Ok(rd) = std::fs::read_dir(&dir) {
                 for e in rd.flatten() {
@@ -79,20 +89,40 @@ pub fn run(cmd: OfflineCmd, _settings: &Settings) -> i32 {
                             "name": p.file_stem().and_then(|s| s.to_str()).unwrap_or(""),
                             "path": p.display().to_string(),
                             "size_bytes": size,
+                            "source": "local",
                         }));
                     }
                 }
             }
+            let local_names: Vec<String> = models
+                .iter()
+                .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(str::to_string))
+                .collect();
+            let mut remote = Vec::new();
+            for name in offline_router::VERIFIED_MODELS {
+                if !local_names.iter().any(|n| n == name) {
+                    remote.push(json!({
+                        "name": name,
+                        "path": Value::Null,
+                        "size_bytes": Value::Null,
+                        "source": "verified-not-downloaded",
+                    }));
+                }
+            }
+            let all: Vec<Value> = models.iter().chain(remote.iter()).cloned().collect();
             if c.json {
-                println!("{}", serde_json::to_string_pretty(&models).unwrap_or_default());
-            } else if models.is_empty() {
+                println!("{}", serde_json::to_string_pretty(&all).unwrap_or_default());
+            } else if all.is_empty() {
                 println!("No local GGUF models found in {}", dir.display());
             } else {
-                for m in &models {
+                for m in &all {
+                    let source = m.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                    let path = m.get("path").and_then(|v| v.as_str()).unwrap_or("not downloaded");
                     println!(
-                        "{}  {}",
+                        "{}  {}  [{}]",
                         m.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                        m.get("path").and_then(|v| v.as_str()).unwrap_or("")
+                        path,
+                        source
                     );
                 }
             }
@@ -137,17 +167,36 @@ pub fn run(cmd: OfflineCmd, _settings: &Settings) -> i32 {
                 }
             }
         }
-        OfflineSub::Install => {
-            eprintln!(
-                "Offline mode is not available in this build: it needs the pinned llama.cpp engine at {}.\n\
-                 Install it with the upstream Ante release, or run against a local OpenAI-compatible server by adding a catalog provider.",
-                engine_path().display()
-            );
-            1
-        }
-        OfflineSub::Stop => {
-            println!("No offline router is running.");
-            0
-        }
+        OfflineSub::Install => match offline_engine::install() {
+            Ok(report) => {
+                println!(
+                    "Installed llama.cpp {} ({}, {}) at {}",
+                    offline_engine::PINNED_VERSION,
+                    report.artifact,
+                    report.accelerator,
+                    report.engine_dir.display()
+                );
+                println!("sha256 {}", report.sha256);
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        OfflineSub::Stop => match offline_router::stop() {
+            Ok(true) => {
+                println!("Stopped the offline llama.cpp router.");
+                0
+            }
+            Ok(false) => {
+                println!("No offline router is running.");
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
     }
 }

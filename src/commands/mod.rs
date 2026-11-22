@@ -25,7 +25,11 @@ pub async fn dispatch(cmd: crate::cli::Command, settings: Settings, profile: Opt
         crate::cli::Command::Auth(a) => auth::run(a).await,
         crate::cli::Command::Usage(u) => usage::run(u).await,
         crate::cli::Command::Rage(r) => rage::run(r, &settings),
-        crate::cli::Command::Offline(o) => offline::run(o, &settings),
+        crate::cli::Command::Offline(o) => {
+            tokio::task::spawn_blocking(move || offline::run(o, &settings))
+                .await
+                .unwrap_or(1)
+        }
         crate::cli::Command::Update(u) => update::run(u),
         crate::cli::Command::Serve(s) => serve::run(s, settings).await,
     }

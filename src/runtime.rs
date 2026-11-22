@@ -12,6 +12,7 @@ pub const TOOLS_LONG: &str = include_str!("../resources/tools_long.json");
 pub const TOOLS_SHORT: &str = include_str!("../resources/tools_short.json");
 pub const BUILTIN_AGENTS: &str = include_str!("../resources/builtin_agents.json");
 pub const BUILTIN_SKILLS: &str = include_str!("../resources/builtin_skills.json");
+pub const SKILLS_PROMPT: &str = include_str!("../resources/skills_prompt.md");
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -31,12 +32,40 @@ pub struct Runtime {
     pub session_id: String,
     pub interactive: bool,
     pub auto_compact: bool,
+    pub mcp: std::sync::Arc<crate::mcp::McpManager>,
+    pub jobs: std::sync::Arc<crate::jobs::JobRegistry>,
 }
 
 pub const DEFAULT_TOOLS: &[&str] = &[
-    "Agent", "AskUser", "Bash", "Edit", "Glob", "Grep", "Read", "Terminal", "WebFetch", "Write",
+    "Agent", "AskUser", "Bash", "Edit", "Glob", "Grep", "Read", "WebFetch", "WebSearch", "Write",
 ];
 pub const OFF_BY_DEFAULT: &[&str] = &["TodoWrite", "ViewImage"];
+
+/// Accept the lowercase spellings used by the original CLI and settings.
+pub fn canonical_tool_name(name: &str) -> String {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "todowrite" | "todo-write" | "todo" => "TodoWrite".into(),
+        "viewimage" | "view-image" | "view_image" => "ViewImage".into(),
+        "websearch" | "web-search" | "web_search" => "WebSearch".into(),
+        "webfetch" | "web-fetch" | "web_fetch" => "WebFetch".into(),
+        "askuser" | "ask-user" | "ask_user" => "AskUser".into(),
+        "agent" => "Agent".into(),
+        "bash" => "Bash".into(),
+        "edit" => "Edit".into(),
+        "glob" => "Glob".into(),
+        "grep" => "Grep".into(),
+        "read" => "Read".into(),
+        "write" => "Write".into(),
+        "terminal" | "term" => "Terminal".into(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
 
 pub struct RuntimeOptions {
     pub settings: Settings,
@@ -72,7 +101,7 @@ impl Runtime {
             .or_else(|| model.effort.clone());
 
         let mut tool_names: Vec<String> = if let Some(list) = opts.tools.clone().or_else(|| opts.settings.tools.clone()) {
-            list
+            list.into_iter().map(|t| canonical_tool_name(&t)).collect()
         } else {
             DEFAULT_TOOLS.iter().map(|s| s.to_string()).collect()
         };
@@ -83,7 +112,10 @@ impl Runtime {
             .chain(std::iter::once(&String::new()))
         {
             if !t.is_empty() && !tool_names.iter().any(|x| x == t) {
-                tool_names.push(t.clone());
+                let canonical = canonical_tool_name(t);
+                if !tool_names.iter().any(|x| x == &canonical) {
+                    tool_names.push(canonical);
+                }
             }
         }
         let excludes: Vec<String> = opts
@@ -91,9 +123,12 @@ impl Runtime {
             .iter()
             .chain(opts.settings.exclude_tools.iter())
             .cloned()
+            .map(|t| canonical_tool_name(&t))
             .collect();
         tool_names.retain(|t| !excludes.iter().any(|e| e == t));
 
+        let mcp = std::sync::Arc::new(crate::mcp::McpManager::new(&opts.settings.mcp_servers));
+        let jobs = std::sync::Arc::new(crate::jobs::JobRegistry::new());
         let mode = opts
             .permission_mode
             .clone()
@@ -119,6 +154,8 @@ impl Runtime {
             session_id: opts.session_id.unwrap_or_else(|| format!("ses_{}", util::ulid())),
             interactive: opts.interactive,
             auto_compact: opts.settings.auto_compact.unwrap_or(true),
+            mcp,
+            jobs,
             settings: opts.settings,
         }
     }
@@ -130,7 +167,7 @@ impl Runtime {
     pub fn tool_schemas(&self) -> Vec<Value> {
         let raw: Vec<Value> = serde_json::from_str(if self.short_prompt { TOOLS_SHORT } else { TOOLS_LONG })
             .unwrap_or_default();
-        raw.into_iter()
+        let mut schemas: Vec<Value> = raw.into_iter()
             .filter_map(|t| {
                 let f = t.get("function").cloned().unwrap_or(t.clone());
                 let name = f.get("name")?.as_str()?.to_string();
@@ -144,7 +181,9 @@ impl Runtime {
                     None
                 }
             })
-            .collect()
+            .collect();
+        schemas.extend(self.mcp.tool_schemas());
+        schemas
     }
 
     pub fn system_sections(&self) -> Vec<String> {
@@ -171,14 +210,28 @@ impl Runtime {
         if self.settings.skills_enabled() {
             let skills = crate::skills::discover(&self.cwd);
             if !skills.is_empty() {
-                let mut listing = String::from("<system-reminder>\n        ## Skills\n");
-                listing.push_str("- A skill is a set of local instructions stored in a `SKILL.md` file. Read it before using a skill.\n");
-                for s in skills.iter().take(12) {
-                    listing.push_str(&format!("- {}: {}\n", s.name, crate::util::truncate(&s.description, 240, "…")));
+                let mut listing = String::from("<system-reminder>\n");
+                for s in skills.iter().take(24) {
+                    let path = s
+                        .path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| format!("builtin:{}", s.name));
+                    listing.push_str(&format!(
+                        "- {} [{}]: {} (path: {})\n",
+                        s.name,
+                        s.scope,
+                        crate::util::truncate(&s.description, 260, "…"),
+                        path
+                    ));
                 }
                 listing.push_str("        </system-reminder>");
-                out.push(listing);
+                out.push(SKILLS_PROMPT.replace("{{SKILL_LIST}}", listing.trim_end()));
             }
+        }
+
+        if self.settings.auto_memory() {
+            out.push(crate::memory::system_section());
         }
 
         let agents: Vec<Value> = serde_json::from_str(BUILTIN_AGENTS).unwrap_or_default();
@@ -194,7 +247,7 @@ impl Runtime {
         out
     }
 
-    fn environment_section(&self) -> String {
+    pub(crate) fn environment_section(&self) -> String {
         let cwd = self.cwd.display();
         let git = if util::is_git_repo(&self.cwd) { "true" } else { "false" };
         format!(
@@ -237,5 +290,31 @@ impl Runtime {
             "display_name": self.provider.display_name,
             "base_url": self.provider.base_url,
         })
+    }
+}
+
+#[cfg(test)]
+mod tool_schema_tests {
+    use super::*;
+
+    #[test]
+    fn lowercase_tool_aliases_are_canonicalized() {
+        assert_eq!(canonical_tool_name("todowrite"), "TodoWrite");
+        assert_eq!(canonical_tool_name("view_image"), "ViewImage");
+        assert_eq!(canonical_tool_name("web-search"), "WebSearch");
+    }
+
+    #[test]
+    fn all_default_tools_have_schemas_in_both_prompts() {
+        for raw in [TOOLS_LONG, TOOLS_SHORT] {
+            let schemas: Vec<Value> = serde_json::from_str(raw).unwrap();
+            let names: Vec<String> = schemas
+                .iter()
+                .filter_map(|v| v.get("function")?.get("name")?.as_str().map(str::to_string))
+                .collect();
+            for tool in DEFAULT_TOOLS.iter().chain(OFF_BY_DEFAULT.iter()) {
+                assert!(names.iter().any(|n| n == tool), "missing schema for {tool}");
+            }
+        }
     }
 }

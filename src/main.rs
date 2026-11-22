@@ -6,7 +6,12 @@ mod commands;
 mod credentials;
 mod goal;
 mod headless;
+mod jobs;
 mod llm;
+mod mcp;
+mod memory;
+mod offline_engine;
+mod offline_router;
 mod protocol;
 mod repl;
 mod runtime;
@@ -51,9 +56,32 @@ async fn run(cli: cli::Cli) -> i32 {
     apply_overrides(&mut settings, &run_args);
 
     if let Some(p) = &run_args.offline_model {
-        eprintln!("offline mode is not available in this build; use a provider with an API key");
-        let _ = p;
-        return 1;
+        let requested = p.clone();
+        let started = tokio::task::spawn_blocking(move || {
+            let model = if requested.is_empty() {
+                None
+            } else {
+                Some(offline_router::resolve_model(&requested)?)
+            };
+            offline_router::ensure_router(model.as_deref())
+        })
+        .await;
+        match started {
+            Ok(Ok(endpoint)) => {
+                std::env::set_var("ANTE_OFFLINE_ENDPOINT", &endpoint.base_url);
+                std::env::set_var("ANTE_OFFLINE_MODEL", &endpoint.model);
+                settings.provider = Some("offline".into());
+                settings.model = Some(endpoint.model);
+            }
+            Ok(Err(e)) => {
+                eprintln!("{e}");
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("offline router task failed: {e}");
+                return 1;
+            }
+        }
     }
 
     let system_prompt = if let Some(path) = &run_args.system_prompt_file {
@@ -137,6 +165,11 @@ async fn run(cli: cli::Cli) -> i32 {
     }
     if run_args.disable_auto_memory {
         rt.settings.auto_memory = Some(false);
+    }
+    if !rt.mcp.configured().is_empty() {
+        if let Err(e) = rt.mcp.start().await {
+            eprintln!("warning: MCP initialization failed: {e}");
+        }
     }
     if run_args.yolo || (interactive
         && rt.permission_mode == tools::permission::Mode::Auto

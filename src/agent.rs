@@ -50,6 +50,18 @@ where
     let mut all_thinking = String::new();
     let mut usage = Usage::default();
 
+    let notices = runtime.jobs.drain_notifications();
+    if !notices.is_empty() {
+        messages.push(Message::user_text(format!(
+            "<notification from=\"job\">\n{}\n</notification>",
+            notices.join("\n")
+        )));
+    }
+
+    if let Err(e) = crate::credentials::refresh_if_needed(&runtime.provider.credential, &runtime.catalog).await {
+        eprintln!("warning: OAuth refresh failed: {e}");
+    }
+
     let client = match runtime.client() {
         Ok(c) => c,
         Err(e) => {
@@ -266,27 +278,29 @@ where
         });
 
         if runtime.auto_compact {
-            maybe_compact(messages, &runtime, usage);
+            maybe_compact(messages, &runtime, usage).await;
         }
     }
 }
 
-fn maybe_compact(messages: &mut Vec<Message>, runtime: &Runtime, usage: Usage) {
+async fn maybe_compact(messages: &mut Vec<Message>, runtime: &Runtime, usage: Usage) {
     let limit = runtime.model.context_limit.unwrap_or(200_000);
-    let used = usage.input_tokens + usage.output_tokens;
+    // `input_tokens` from the latest request is the current prompt size.
+    // Accumulated output tokens are not part of the next context window.
+    let used = usage.input_tokens;
     if used as f64 <= 0.85 * limit as f64 || messages.len() < 8 {
         return;
     }
-    // Keep the first user message plus the most recent messages, and say so.
-    let first = messages.first().cloned();
-    let tail: Vec<Message> = messages[messages.len().saturating_sub(6)..].to_vec();
-    *messages = Vec::new();
-    if let Some(f) = first {
-        messages.push(f);
-    }
-    messages.push(Message::user_text(
-        "<system-reminder>\nEarlier conversation was compacted to fit the context window; continue from the recent messages below.\n</system-reminder>",
-    ));
+    let tail: Vec<Message> = messages[messages.len().saturating_sub(4)..].to_vec();
+    let handoff = crate::goal::handoff(
+        &std::sync::Arc::new(runtime.clone()),
+        messages,
+        "Context window compaction. Preserve current progress, decisions, and exact next steps.",
+    )
+    .await;
+    *messages = vec![Message::user_text(format!(
+        "<system-reminder>\nEarlier conversation was compacted to fit the context window.\n\n{handoff}\n</system-reminder>"
+    ))];
     messages.extend(tail);
 }
 
@@ -367,7 +381,11 @@ pub async fn agent_tool(ctx: &crate::tools::ToolCtx, input: &Value) -> ToolResul
     child.tool_names = tools;
     child.interactive = false;
     child.system_override = Some(if subagent_type == "explore" {
-        "You are Ante's codebase exploration specialist. Answer the assigned question without changing state.\n\nYou have been invoked in the following environment:".to_string()
+        format!(
+            "{}\n\n{}",
+            include_str!("../resources/subagent_explore.md"),
+            child.environment_section()
+        )
     } else {
         "You are a general-purpose subagent. Complete the assigned task and return a concise final report.".to_string()
     });

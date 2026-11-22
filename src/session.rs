@@ -108,6 +108,66 @@ impl Session {
         Ok(())
     }
 
+    fn snapshots_dir(&self) -> PathBuf {
+        self.dir().join("snapshots")
+    }
+
+    /// Persist the dialog at a user-turn boundary. Snapshot numbers are 1-based.
+    pub fn save_snapshot(&self, number: usize) -> Result<()> {
+        let dir = self.snapshots_dir();
+        std::fs::create_dir_all(&dir)?;
+        let records: Vec<MessageRecord> = self.messages.iter().map(to_record).collect();
+        crate::util::write_file(
+            &dir.join(format!("{number:04}.json")),
+            &serde_json::to_string(&records)?,
+        )?;
+        Ok(())
+    }
+
+    pub fn snapshot_numbers(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.snapshots_dir()) {
+            for e in rd.flatten() {
+                if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
+                    if let Ok(n) = stem.parse::<usize>() {
+                        out.push(n);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
+    pub fn load_snapshot(&self, number: usize) -> Result<Vec<Message>> {
+        let path = self
+            .snapshots_dir()
+            .join(format!("{number:04}.json"));
+        let records: Vec<MessageRecord> = serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+        Ok(records.into_iter().map(from_record).collect())
+    }
+
+    /// Create a new session whose dialog starts at an existing snapshot.
+    pub fn fork_from(&self, number: usize) -> Result<Session> {
+        let messages = self.load_snapshot(number)?;
+        let mut fork = Session::new(
+            self.meta.provider.clone(),
+            self.meta.model.clone(),
+            self.meta.short_prompt,
+        );
+        fork.system = self.system.clone();
+        fork.messages = messages;
+        fork.meta.dir = self.meta.dir.clone();
+        fork.meta.rolled_from = Some(self.meta.id.clone());
+        if let Some(first) = fork.messages.first() {
+            let text = first.text();
+            fork.note_user_message(&text);
+        }
+        fork.save()?;
+        Ok(fork)
+    }
+
     pub fn append_event(&self, event: &serde_json::Value) {
         let dir = self.dir();
         if std::fs::create_dir_all(&dir).is_err() {
@@ -215,5 +275,30 @@ fn from_record(r: MessageRecord) -> Message {
                 BlockRecord::Image { media_type, data } => Block::Image { media_type, data },
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_roundtrip_and_fork() {
+        let _guard = crate::util::TEST_ENV_LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("ante-session-test-{}", crate::util::ulid()));
+        std::env::set_var("ANTE_HOME", &home);
+        let mut s = Session::new("offline", "test", false);
+        s.system = vec!["system".into()];
+        s.messages = vec![Message::user_text("hello")];
+        s.save_snapshot(1).unwrap();
+        assert_eq!(s.snapshot_numbers(), vec![1]);
+        let restored = s.load_snapshot(1).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].text(), "hello");
+        let fork = s.fork_from(1).unwrap();
+        assert_ne!(fork.meta.id, s.meta.id);
+        assert_eq!(fork.messages[0].text(), "hello");
+        assert_eq!(fork.meta.rolled_from.as_deref(), Some(s.meta.id.as_str()));
+        let _ = std::fs::remove_dir_all(home);
     }
 }
