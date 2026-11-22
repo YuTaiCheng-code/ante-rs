@@ -5,12 +5,12 @@
 > 本项目是对 Antigma Labs 的 `ante` 0.3.4（终端 AI 编码代理）的独立逆向学习与 Rust 重实现。**不得用于商业用途，不得用于绕过授权、付费、风控或访问控制。**
 > 仓库不包含原始二进制、内嵌手册或专有资源；"Ante"、"Antigma" 等名称与商标归 Antigma Labs 所有，本项目与其无隶属或背书关系。
 
-## 预编译二进制（Linux，静态 musl）
+## 预编译二进制（Linux，静态 musl，含真彩色 TUI）
 
 | 架构 | 文件 | 大小 | SHA-256 |
 | --- | --- | --- | --- |
-| x86_64 | [`ante-v0.3.4-x86_64-linux-musl`](ante-v0.3.4-x86_64-linux-musl) | 4.9 MB | `666a1915d4966ff9ed017d154be49addd14ee5961db4ea340e00cea49de78e83` |
-| aarch64 | [`ante-v0.3.4-aarch64-linux-musl`](ante-v0.3.4-aarch64-linux-musl) | 4.0 MB | `81179e12b72d85eb722f6f30102813f975d6fa3b96a9520ef91f3e8f32ae1161` |
+| x86_64 | [`ante-v0.3.4-x86_64-linux-musl`](ante-v0.3.4-x86_64-linux-musl) | 4.9 MB | `d0578794d96486407f76364688beab7676febdf961d93053d3814eb0e7261dd3` |
+| aarch64 | [`ante-v0.3.4-aarch64-linux-musl`](ante-v0.3.4-aarch64-linux-musl) | 4.0 MB | `757d93bef7b165ba67301b7105269ab1c31be17f6459c8d0c6650e86d8164304` |
 
 校验：`sha256sum -c SHA256SUMS.txt`
 
@@ -21,7 +21,7 @@ chmod +x ante-v0.3.4-x86_64-linux-musl
 
 ## 源码包
 
-[`ante-rs-0.3.4-reimpl.tar.gz`](ante-rs-0.3.4-reimpl.tar.gz)（含 `src/`、`resources/`、测试、黄金帧与说明文档；不含原始二进制）
+[`ante-rs-0.3.4-reimpl.tar.gz`](ante-rs-0.3.4-reimpl.tar.gz)（含 `src/`、`resources/`、测试、黄金帧与说明文档）
 
 ```bash
 tar xzf ante-rs-0.3.4-reimpl.tar.gz
@@ -29,13 +29,15 @@ cd ante-rs
 cargo build --release
 ```
 
-## TUI 视觉验证（xterm 120×40）
+## TUI 颜色（与原件对齐）
+
+原件为 24-bit 真彩色，本实现已补上对应色值：Logo 橙色逐列渐变（`#ffaf00` → `#d78700` → `#af8700` → `#af5f00`）、标题 `#ff875f`、目录与次要路径 `#5f5f87`、未连接提示 `#87afaf`。
 
 ![欢迎页](welcome.png)
 
 ![命令面板](palette.png)
 
-逐字符比对 9/9，相似度 1.000。
+> 截图是配色修复前的灰度版，验证色值请在终端直接运新二进制。
 
 ## 技术要点
 
