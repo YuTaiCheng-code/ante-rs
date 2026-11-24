@@ -1,0 +1,2 @@
+1a26401473c456ce5a8f69d43fbd6bfe60e96f81a2a4b41df0ba43cb8b05eb71  ante-v0.3.4-x86_64-linux-musl
+44f8bf7335621b0f8eb8089d6fae6f3c41438f7b1e5f129ed8fdf637778b6c8e  ante-v0.3.4-aarch64-linux-musl
